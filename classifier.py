@@ -12,8 +12,7 @@ from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 
-
-TQDM_DISABLE=False
+TQDM_DISABLE = False
 
 
 # Fix the random seed.
@@ -34,6 +33,7 @@ class BertSentimentClassifier(torch.nn.Module):
     In the SST dataset, there are 5 sentiment categories (from 0 - "negative" to 4 - "positive").
     Thus, your forward() should return one logit for each of the 5 classes.
     '''
+
     def __init__(self, config):
         super(BertSentimentClassifier, self).__init__()
         self.num_labels = config.num_labels
@@ -49,8 +49,11 @@ class BertSentimentClassifier(torch.nn.Module):
 
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
         ### TODO
-        raise NotImplementedError
+        self.hidden_size = config.hidden_size
+        self.classifier_layer = torch.nn.Linear(self.hidden_size, self.num_labels)
+        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
 
+        # raise NotImplementedError
 
     def forward(self, input_ids, attention_mask):
         '''Takes a batch of sentences and returns logits for sentiment classes'''
@@ -58,8 +61,12 @@ class BertSentimentClassifier(torch.nn.Module):
         # HINT: You should consider what is an appropriate return value given that
         # the training loop currently uses F.cross_entropy as the loss function.
         ### TODO
-        raise NotImplementedError
+        pooler_output = self.bert(input_ids=input_ids, attention_mask=attention_mask)['pooler_output']
+        dropped_output = self.dropout(pooler_output)
+        logits = self.classifier_layer(dropped_output)
+        return F.log_softmax(logits, dim=1)
 
+        # raise NotImplementedError
 
 
 class SentimentDataset(Dataset):
@@ -87,15 +94,15 @@ class SentimentDataset(Dataset):
         return token_ids, attention_mask, labels, sents, sent_ids
 
     def collate_fn(self, all_data):
-        token_ids, attention_mask, labels, sents, sent_ids= self.pad_data(all_data)
+        token_ids, attention_mask, labels, sents, sent_ids = self.pad_data(all_data)
 
         batched_data = {
-                'token_ids': token_ids,
-                'attention_mask': attention_mask,
-                'labels': labels,
-                'sents': sents,
-                'sent_ids': sent_ids
-            }
+            'token_ids': token_ids,
+            'attention_mask': attention_mask,
+            'labels': labels,
+            'sents': sents,
+            'sent_ids': sent_ids
+        }
 
         return batched_data
 
@@ -123,14 +130,14 @@ class SentimentTestDataset(Dataset):
         return token_ids, attention_mask, sents, sent_ids
 
     def collate_fn(self, all_data):
-        token_ids, attention_mask, sents, sent_ids= self.pad_data(all_data)
+        token_ids, attention_mask, sents, sent_ids = self.pad_data(all_data)
 
         batched_data = {
-                'token_ids': token_ids,
-                'attention_mask': attention_mask,
-                'sents': sents,
-                'sent_ids': sent_ids
-            }
+            'token_ids': token_ids,
+            'attention_mask': attention_mask,
+            'sents': sents,
+            'sent_ids': sent_ids
+        }
 
         return batched_data
 
@@ -141,19 +148,19 @@ def load_data(filename, flag='train'):
     data = []
     if flag == 'test':
         with open(filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in csv.DictReader(fp, delimiter='\t'):
                 sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
-                data.append((sent,sent_id))
+                data.append((sent, sent_id))
     else:
         with open(filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in csv.DictReader(fp, delimiter='\t'):
                 sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
                 label = int(record['sentiment'].strip())
                 if label not in num_labels:
                     num_labels[label] = len(num_labels)
-                data.append((sent, label,sent_id))
+                data.append((sent, label, sent_id))
         print(f"load {len(data)} data from {filename}")
 
     if flag == 'train':
@@ -164,14 +171,14 @@ def load_data(filename, flag='train'):
 
 # Evaluate the model on dev examples.
 def model_eval(dataloader, model, device):
-    model.eval() # Switch to eval model, will turn off randomness like dropout.
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
     y_true = []
     y_pred = []
     sents = []
     sent_ids = []
     for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
-        b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'],batch['attention_mask'],  \
-                                                        batch['labels'], batch['sents'], batch['sent_ids']
+        b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'], batch['attention_mask'], \
+            batch['labels'], batch['sents'], batch['sent_ids']
 
         b_ids = b_ids.to(device)
         b_mask = b_mask.to(device)
@@ -194,13 +201,13 @@ def model_eval(dataloader, model, device):
 
 # Evaluate the model on test examples.
 def model_test_eval(dataloader, model, device):
-    model.eval() # Switch to eval model, will turn off randomness like dropout.
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
     y_pred = []
     sents = []
     sent_ids = []
     for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
-        b_ids, b_mask, b_sents, b_sent_ids = batch['token_ids'],batch['attention_mask'],  \
-                                                         batch['sents'], batch['sent_ids']
+        b_ids, b_mask, b_sents, b_sent_ids = batch['token_ids'], batch['attention_mask'], \
+            batch['sents'], batch['sent_ids']
 
         b_ids = b_ids.to(device)
         b_mask = b_mask.to(device)
@@ -286,14 +293,15 @@ def train(args):
 
         train_loss = train_loss / (num_batches)
 
-        train_acc, train_f1, *_  = model_eval(train_dataloader, model, device)
+        train_acc, train_f1, *_ = model_eval(train_dataloader, model, device)
         dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        print(
+            f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 
 def test(args):
@@ -305,15 +313,17 @@ def test(args):
         model.load_state_dict(saved['model'])
         model = model.to(device)
         print(f"load model from {args.filepath}")
-        
+
         dev_data = load_data(args.dev, 'valid')
         dev_dataset = SentimentDataset(dev_data, args)
-        dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=dev_dataset.collate_fn)
+        dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=dev_dataset.collate_fn)
 
         test_data = load_data(args.test, 'test')
         test_dataset = SentimentTestDataset(test_data, args)
-        test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=test_dataset.collate_fn)
-        
+        test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size,
+                                     collate_fn=test_dataset.collate_fn)
+
         dev_acc, dev_f1, dev_pred, dev_true, dev_sents, dev_sent_ids = model_eval(dev_dataloader, model, device)
         print('DONE DEV')
         test_pred, test_sents, test_sent_ids = model_test_eval(test_dataloader, model, device)
@@ -321,12 +331,12 @@ def test(args):
         with open(args.dev_out, "w+") as f:
             print(f"dev acc :: {dev_acc :.3f}")
             f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(dev_sent_ids,dev_pred ):
+            for p, s in zip(dev_sent_ids, dev_pred):
                 f.write(f"{p} , {s} \n")
 
         with open(args.test_out, "w+") as f:
             f.write(f"id \t Predicted_Sentiment \n")
-            for p, s  in zip(test_sent_ids,test_pred ):
+            for p, s in zip(test_sent_ids, test_pred):
                 f.write(f"{p} , {s} \n")
 
 
@@ -364,8 +374,8 @@ if __name__ == "__main__":
         dev='data/ids-sst-dev.csv',
         test='data/ids-sst-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
+        dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
+        test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
     )
 
     train(config)
@@ -385,8 +395,8 @@ if __name__ == "__main__":
         dev='data/ids-cfimdb-dev.csv',
         test='data/ids-cfimdb-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
+        dev_out='predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
+        test_out='predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
     )
 
     train(config)
