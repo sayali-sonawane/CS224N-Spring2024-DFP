@@ -46,6 +46,84 @@ def model_eval_sst(dataloader, model, device):
     return acc, f1, y_pred, y_true, sents, sent_ids
 
 
+# Evaluate multitask model on Para only.
+def model_eval_para(dataloader, model, device):
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
+    y_true = []
+    y_pred = []
+    sents = []
+    sent_ids = []
+    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+        (b_ids1, b_mask1,
+         b_ids2, b_mask2,
+         b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                                  batch['token_ids_2'], batch['attention_mask_2'],
+                                  batch['labels'], batch['sent_ids'])
+
+        b_ids1 = b_ids1.to(device)
+        b_mask1 = b_mask1.to(device)
+        b_ids2 = b_ids2.to(device)
+        b_mask2 = b_mask2.to(device)
+
+        # logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+        # logits = logits.sigmoid().round().flatten().cpu().numpy()
+        # preds = np.argmax(logits, axis=1).flatten()
+
+        logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+        y_hat = logits.sigmoid().round().flatten().to(device)
+        b_labels = b_labels.flatten().to(device)
+
+        # b_labels = b_labels.flatten()
+        y_true.extend(b_labels)
+        y_pred.extend(y_hat)
+        # sents.extend(b_sents)
+        sent_ids.extend(b_sent_ids)
+
+    f1 = f1_score(y_true, y_pred, average='macro')
+    acc = accuracy_score(y_true, y_pred)
+
+    return acc, f1, y_pred, y_true, sents, sent_ids
+
+
+# Evaluate multitask model on STS only.
+def model_eval_sts(dataloader, model, device):
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
+    y_true = []
+    y_pred = []
+    sents = []
+    sent_ids = []
+    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+        (b_ids1, b_mask1,
+         b_ids2, b_mask2,
+         b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                                  batch['token_ids_2'], batch['attention_mask_2'],
+                                  batch['labels'], batch['sent_ids'])
+
+        b_ids1 = b_ids1.to(device)
+        b_mask1 = b_mask1.to(device)
+        b_ids2 = b_ids2.to(device)
+        b_mask2 = b_mask2.to(device)
+
+        # logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+        # logits = logits.detach().cpu().numpy()
+        # preds = np.argmax(logits, axis=1).flatten()
+
+        logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+        y_hat = logits.flatten().to(device)
+        b_labels = b_labels.flatten().to(device)
+
+        b_labels = b_labels.flatten()
+        y_true.extend(b_labels)
+        y_pred.extend(y_hat)
+        # sents.extend(b_sents)
+        sent_ids.extend(b_sent_ids)
+
+    f1 = f1_score(y_true, y_pred, average='macro')
+    acc = accuracy_score(y_true, y_pred)
+
+    return acc, f1, y_pred, y_true, sents, sent_ids
+
+
 # Evaluate multitask model on dev sets.
 def model_eval_multitask(sentiment_dataloader,
                          paraphrase_dataloader,

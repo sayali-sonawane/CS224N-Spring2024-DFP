@@ -52,8 +52,8 @@ class BertSelfAttention(nn.Module):
 
     ### TODO
     bs, num_attention_heads, seq_len, hidden_dimensions = key.size()
-    att = (query @ key.transpose(2, 3)) / (math.sqrt(self.attention_head_size))
-    att += attention_mask
+    att = torch.div((query @ key.transpose(2, 3)), (math.sqrt(self.attention_head_size)))  # [bs, num_attention_heads, seq_len, seq_len]
+    att.add_(attention_mask)
     att = F.softmax(att, dim=3)
     att = self.dropout(att)
     y = att @ value
