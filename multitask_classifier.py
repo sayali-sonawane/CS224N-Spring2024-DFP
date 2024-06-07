@@ -13,6 +13,7 @@ writes all required submission files.
 '''
 
 import random, numpy as np, argparse
+import copy
 from types import SimpleNamespace
 from itertools import zip_longest, cycle
 
@@ -21,7 +22,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from bert import BertModel
+from bert import BertModel, LoRA, get_extended_attention_mask, BertLoRAModel
 from optimizer import AdamW
 from tqdm import tqdm
 from tokenizer import BertTokenizer
@@ -63,9 +64,14 @@ class MultitaskBERT(nn.Module):
     - Paraphrase detection (predict_paraphrase)
     - Semantic Textual Similarity (predict_similarity)
     '''
-    def __init__(self, config):
+    def __init__(self, config, enableLora=False):
         super(MultitaskBERT, self).__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        lora = False
+        if(lora):
+            self.bert = BertLoRAModel.from_pretrained('bert-base-uncased')
+            self.freeze_model()
+        else:
+            self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         # last-linear-layer mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
@@ -77,6 +83,7 @@ class MultitaskBERT(nn.Module):
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
         # raise NotImplementedError
+        self.dtype = torch.long
         ### Sentiment Classifier
         self.hidden_size = config.hidden_size
         self.classifier_layer_1 = torch.nn.Linear(self.hidden_size, self.hidden_size)
@@ -98,6 +105,34 @@ class MultitaskBERT(nn.Module):
         self.dropout_sem_1 = torch.nn.Dropout(config.hidden_dropout_prob)
         self.dropout_sem_2 = torch.nn.Dropout(config.hidden_dropout_prob)
 
+        ### LoRA parameters
+        # enableLora = True
+        # self.enableLora = enableLora
+        # if(self.enableLora):
+        #     self.rank = 1
+        #     self.freeze_model(self.bert)
+        #     self.add_lora_to_model()
+
+
+
+    # def add_lora_to_model(self):
+    #     modules = self.bert.named_modules()
+    #     for idx, (name, module) in enumerate(modules):
+    #         # print("======layer details======", name, idx)
+    #         if isinstance(module, nn.Linear) and "lora" not in name:
+    #             # print("======layer details======", name, idx, module.in_features, module.out_features)
+    #             input_dim = module.in_features
+    #             output_dim = module.out_features
+    #             lora_layer = LoRA(input_dim, output_dim, self.rank)
+    #             module.lora_layer = lora_layer
+
+
+    def freeze_model(self):
+        """Freezes all layers except the LoRa modules and classifier."""
+        for name, param in self.bert.named_parameters():
+            if "lora" not in name and "classifier" not in name and "dropout" not in name:
+                param.requires_grad = False
+
 
     def forward(self, input_ids, attention_mask):
         """
@@ -108,8 +143,23 @@ class MultitaskBERT(nn.Module):
         # (e.g., by adding other layers).
         """
         ### TODO
-        pooler_output = self.bert(input_ids=input_ids, attention_mask=attention_mask)['pooler_output']
-        return pooler_output
+        # outputs = input_ids
+        # # extended_attention_mask: torch.Tensor = get_extended_attention_mask(attention_mask, self.dtype)
+        # if(self.enableLora):
+        #
+        #     for idx, (name, module) in enumerate(self.bert.named_modules()):
+        #         if isinstance(module, nn.Linear) and hasattr(module, 'lora_layer'):
+        #             # original_output = module.forward(outputs, extended_attention_mask)
+        #             print("====idx, name====", idx, name)
+        #             original_output = module(input_ids=outputs, attention_mask=attention_mask)['pooler_output'][:, idx]
+        #             print("====orig output shape====", original_output.size())
+        #             print("====input shape====", outputs.size())
+        #             lora_output = module.lora_layer(outputs)
+        #             outputs = original_output + lora_output
+        #     outputs = outputs['pooler_output']
+        # else:
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)['pooler_output']
+        return outputs
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -298,7 +348,7 @@ def train_multitask(args):
 
     # train mixed data
     if(mixed_train):
-        train_mixed_gradient_surgery(args, config, device, model, optimizer,
+        train_mixed_weight_sharing(args, config, device, model, optimizer,
                     sts_dev_dataloader, sts_train_dataloader,
                     para_dev_dataloader, para_train_dataloader,
                     sst_dev_dataloader, sst_train_dataloader)
