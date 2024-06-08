@@ -12,21 +12,16 @@ Running `python multitask_classifier.py` trains and tests your MultitaskBERT and
 writes all required submission files.
 '''
 
-import random, numpy as np, argparse
-import copy
+import argparse
+import random
+from itertools import cycle
 from types import SimpleNamespace
-from itertools import zip_longest, cycle
 
-import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader
 
-from bert import BertModel, LoRA, get_extended_attention_mask, BertLoRAModel
-from optimizer import AdamW
-from tqdm import tqdm
-from tokenizer import BertTokenizer
-
+from bert import BertModel, BertLoraSelfAttention
 from datasets import (
     SentenceClassificationDataset,
     SentenceClassificationTestDataset,
@@ -34,9 +29,9 @@ from datasets import (
     SentencePairTestDataset,
     load_multitask_data
 )
-
 from evaluation import *
-
+from optimizer import AdamW
+from tokenizer import BertTokenizer
 
 TQDM_DISABLE=False
 
@@ -66,12 +61,8 @@ class MultitaskBERT(nn.Module):
     '''
     def __init__(self, config, enableLora=False):
         super(MultitaskBERT, self).__init__()
-        lora = False
-        if(lora):
-            self.bert = BertLoRAModel.from_pretrained('bert-base-uncased')
-            self.freeze_model()
-        else:
-            self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.config = config
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         # last-linear-layer mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
@@ -105,6 +96,10 @@ class MultitaskBERT(nn.Module):
         self.dropout_sem_1 = torch.nn.Dropout(config.hidden_dropout_prob)
         self.dropout_sem_2 = torch.nn.Dropout(config.hidden_dropout_prob)
 
+        ### LoRA Freeze weights
+        self.freeze_model()
+        # self.replace_multihead_attention_recursion(self.bert)
+
         ### LoRA parameters
         # enableLora = True
         # self.enableLora = enableLora
@@ -132,6 +127,26 @@ class MultitaskBERT(nn.Module):
         for name, param in self.bert.named_parameters():
             if "lora" not in name and "classifier" not in name and "dropout" not in name:
                 param.requires_grad = False
+
+    def replace_multihead_attention_recursion(self, model):
+        """
+        Replaces RobertaSelfAttention with LoraRobertaSelfAttention in the model.
+        This method applies the replacement recursively to all sub-components.
+
+        Parameters
+        ----------
+        model : nn.Module
+            The PyTorch module or model to be modified.
+        """
+        for name, module in model.named_children():
+            if isinstance(module, BertLoraSelfAttention):
+                # Replace RobertaSelfAttention with LoraRobertaSelfAttention
+                new_layer = BertLoraSelfAttention(self.bert.config)
+                new_layer.load_state_dict(module.state_dict(), strict=False)
+                setattr(model, name, new_layer)
+            else:
+                # Recursive call for child modules
+                self.replace_multihead_attention_recursion(module)
 
 
     def forward(self, input_ids, attention_mask):
@@ -367,7 +382,8 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
         for batch_sts, batch_sst, batch_para in zip(
                 cycle(tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)),
                 cycle(tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)),
-                tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)):
+                tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)
+        ):
             # STS
             token_ids_sts = batch_sts['token_ids_1'].to(device)
             attention_mask_sts = batch_sts['attention_mask_1'].to(device)
@@ -380,7 +396,7 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
                                                              batch_sst['attention_mask'].to(device),
                                                              batch_sst['labels'].to(device))
 
-            # Para
+            ### Para
             token_ids_para = batch_para['token_ids_1'].to(device)
             attention_mask_para = batch_para['attention_mask_1'].to(device)
             token_ids2_para = batch_para['token_ids_2'].to(device)
@@ -401,10 +417,12 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
             loss_sts = F.cross_entropy(logits_sts, labels_sts.view(-1).float(), reduction='sum') / args.batch_size
             loss_sts.backward()
             optimizer.step()
+
             optimizer.zero_grad()
             loss_para = F.cross_entropy(logits_para, labels_para.view(-1).float(), reduction='sum') / args.batch_size
             loss_para.backward()
             optimizer.step()
+
             optimizer.zero_grad()
             loss_sst = F.cross_entropy(logits_sst, labels_sst.view(-1), reduction='sum') / args.batch_size
             loss_sst.backward()
@@ -414,7 +432,7 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
             # loss.backward()
             # optimizer.step()
 
-            train_loss += loss_sts.item() + loss_para.item() + loss_sst.item()
+            train_loss += loss_sts.item()  + loss_sst.item() + loss_para.item()
             num_batches += 1
 
         train_loss = train_loss / (num_batches)
@@ -433,7 +451,7 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
         #
         # if dev_acc > best_dev_acc:
         #     best_dev_acc = dev_acc
-        save_model(model, optimizer, args, config, args.filepath)
+        save_model(model, optimizer, args, config, str(epoch)+args.filepath)
 
         print(
             f"STS Epoch {epoch}: train loss :: {train_loss :.3f}, ") #train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")

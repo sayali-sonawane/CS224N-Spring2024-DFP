@@ -1,5 +1,3 @@
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 import config
@@ -7,6 +5,116 @@ from base_bert import BertPreTrainedModel
 from utils import *
 import math
 
+
+class BertLoraSelfAttention(nn.Module):
+  def __init__(self, config):
+    super().__init__()
+
+    self.num_attention_heads = config.num_attention_heads
+    self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+    self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+    # Initialize the linear transformation layers for key, value, query.
+    self.query = nn.Linear(config.hidden_size, self.all_head_size)
+    self.key = nn.Linear(config.hidden_size, self.all_head_size)
+    self.value = nn.Linear(config.hidden_size, self.all_head_size)
+    # This dropout is applied to normalized attention scores following the original
+    # implementation of transformer. Although it is a bit unusual, we empirically
+    # observe that it yields better performance.
+    self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    ## LoRA params
+    d = self.all_head_size
+    r = 4  # Rank = 4
+    self.lora_query_matrix_B = nn.Parameter(torch.zeros(d, r))
+    self.lora_query_matrix_A = nn.Parameter(torch.randn(r, d))
+    self.lora_value_matrix_B = nn.Parameter(torch.zeros(d, r))
+    self.lora_value_matrix_A = nn.Parameter(torch.randn(r, d))
+
+  def lora_query(self, x):
+    """
+    Applies LoRA to the query component. Computes a modified query output by adding
+    the LoRA adaptation to the standard query output. Requires the regular linear layer
+    to be frozen before training.
+    """
+    lora_query_weights = torch.matmul(self.lora_query_matrix_B, self.lora_query_matrix_A)
+    return self.query(x) + F.linear(x, lora_query_weights)
+
+  def lora_value(self, x):
+    """
+    Applies LoRA to the value component. Computes a modified value output by adding
+    the LoRA adaptation to the standard value output. Requires the regular linear layer
+    to be frozen before training.
+    """
+    lora_value_weights = torch.matmul(self.lora_value_matrix_B, self.lora_value_matrix_A)
+    return self.value(x) + F.linear(x, lora_value_weights)
+
+
+  def attention(self, key, query, value):
+    # Each attention is calculated following eq. (1) of https://arxiv.org/pdf/1706.03762.pdf.
+    # Attention scores are calculated by multiplying the key and query to obtain
+    # a score matrix S of size [bs, num_attention_heads, seq_len, seq_len].
+    # S[*, i, j, k] represents the (unnormalized) attention score between the j-th and k-th
+    # token, given by i-th attention head.
+    # Before normalizing the scores, use the attention mask to mask out the padding token scores.
+    # Note that the attention mask distinguishes between non-padding tokens (with a value of 0)
+    # and padding tokens (with a value of a large negative number).
+
+    # Make sure to:
+    # - Normalize the scores with softmax.
+    # - Multiply the attention scores with the value to get back weighted values.
+    # - Before returning, concatenate multi-heads to recover the original shape:
+    #   [bs, seq_len, num_attention_heads * attention_head_size = hidden_size].
+
+    ### TODO
+    bs, num_attention_heads, seq_len, hidden_dimensions = key.size()
+    att = torch.div((query @ key.transpose(2, 3)), (math.sqrt(self.attention_head_size)))  # [bs, num_attention_heads, seq_len, seq_len]
+    # att.add_(attention_mask)
+    att = F.softmax(att, dim=3)
+    att = self.dropout(att)
+    y = att @ value
+    y = y.transpose(1, 2).contiguous().view(bs, seq_len, self.all_head_size)
+    return y
+
+  def transform(self, x, linear_layer):
+    # The corresponding linear_layer of k, v, q are used to project the hidden_state (x).
+    bs, seq_len = x.shape[:2]
+    proj = linear_layer(x)
+    # Next, we need to produce multiple heads for the proj. This is done by spliting the
+    # hidden state to self.num_attention_heads, each of size self.attention_head_size.
+    proj = proj.view(bs, seq_len, self.num_attention_heads, self.attention_head_size)
+    # By proper transpose, we have proj of size [bs, num_attention_heads, seq_len, attention_head_size].
+    proj = proj.transpose(1, 2)
+    return proj
+
+  def forward(self, hidden_states, *args, **kwargs):
+    """Copied from
+https://github.com/huggingface/transformers/blob/main/src/transformers/models/roberta/modeling_roberta.py
+    but replaced the query and value calls with calls to the
+    lora_query and lora_value functions.
+    We will just sketch of how to adjust this here.
+    Change every call to self.value and self.query in the actual version.
+    """
+    # original code for query:
+    ## mixed_query_layer = self.query(hidden_states)
+    # updated query for LoRA:
+    # mixed_query_layer = self.lora_query(hidden_states)
+
+    # The key has no LoRA, thus leave these calls unchanged
+    # key_layer = self.key(hidden_states)
+
+    # original code for value:
+    ## value_layer = self.transpose_for_scores(self.value(hidden_states))
+    # updated value for LoRA:
+    # value_layer = self.lora_value(hidden_states)
+
+    key_layer = self.transform(hidden_states, self.key)
+    value_layer = self.transform(hidden_states, self.lora_value)
+    query_layer = self.transform(hidden_states, self.lora_query)
+
+    # ... (rest of the forward code, unchanged)
+    attn_value = self.attention(key_layer, query_layer, value_layer)
+    return attn_value
 
 class BertSelfAttention(nn.Module):
   def __init__(self, config):
@@ -84,7 +192,7 @@ class BertLayer(nn.Module):
   def __init__(self, config):
     super().__init__()
     # Multi-head attention.
-    self.self_attention = BertSelfAttention(config)
+    self.self_attention = BertLoraSelfAttention(config)
     # Add-norm for multi-head attention.
     self.attention_dense = nn.Linear(config.hidden_size, config.hidden_size)
     self.attention_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -125,7 +233,7 @@ class BertLayer(nn.Module):
     4. An add-norm operation that takes the input and output of the feed forward layer.
     """
     ### TODO
-    attention_output = self.self_attention(hidden_states, attention_mask)
+    attention_output = self.self_attention(hidden_states)
     attention_norm = self.add_norm(hidden_states, attention_output, self.attention_dense, self.attention_dropout, self.attention_layer_norm)
     interm_output = self.interm_af(self.interm_dense(attention_norm))
     output = self.add_norm(attention_norm, interm_output, self.out_dense, self.out_dropout, self.out_layer_norm)
@@ -163,6 +271,7 @@ class BertModel(BertPreTrainedModel):
     self.pooler_af = nn.Tanh()
 
     self.init_weights()
+
 
   def embed(self, input_ids):
     input_shape = input_ids.size()
@@ -294,9 +403,11 @@ class BertLoRAModel(BertPreTrainedModel):
 
 
   def add_lora_to_model(self):
-    pass
-    # for i, layer_module in enumerate(self.bert_layers):
-    #   lora_layer = LoRA(config.hidden_size, config.hidden_size, self.rank)
+    # pass
+    for i, layer_module in enumerate(self.bert_layers):
+      lora_layer = LoRA(768, 768, self.rank)
+
+    self.bert_layers = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
     # for name, module in self.bert.named_modules():
     #   if isinstance(module, nn.Linear):
@@ -364,7 +475,6 @@ class BertLoRAModel(BertPreTrainedModel):
     # Pass the hidden states through the encoder layers.
     for i, layer_module in enumerate(self.bert_layers):
       # Feed the encoding from the last bert_layer to the next.
-      print("==== hidden state size =====", i, hidden_states.size())
       hidden_states = layer_module(hidden_states, extended_attention_mask)
 
     return hidden_states
