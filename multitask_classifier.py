@@ -335,9 +335,15 @@ def train_multitask(args):
               'fine_tune_mode': args.fine_tune_mode}
 
     config = SimpleNamespace(**config)
-
     model = MultitaskBERT(config)
     model = model.to(device)
+
+    # saved = torch.load(args.filepath)
+    # config = saved['model_config']
+    #
+    # model = MultitaskBERT(config)
+    # model.load_state_dict(saved['model'])
+    # model = model.to(device)
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
@@ -363,7 +369,7 @@ def train_multitask(args):
 
     # train mixed data
     if(mixed_train):
-        train_mixed_weight_sharing(args, config, device, model, optimizer,
+        train_mixed_model(args, config, device, model, optimizer,
                     sts_dev_dataloader, sts_train_dataloader,
                     para_dev_dataloader, para_train_dataloader,
                     sst_dev_dataloader, sst_train_dataloader)
@@ -456,6 +462,93 @@ def train_mixed_weight_sharing(args, config, device, model, optimizer,
         print(
             f"STS Epoch {epoch}: train loss :: {train_loss :.3f}, ") #train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
+
+
+def train_mixed_model(args, config, device, model, optimizer,
+                    sts_dev_dataloader, sts_train_dataloader,
+                    para_dev_dataloader, para_train_dataloader,
+                    sst_dev_dataloader, sst_train_dataloader):
+    best_dev_acc = 0
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
+        num_batches = 0
+        for batch_sts, batch_sst, batch_para in zip(
+                cycle(tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)),
+                cycle(tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)),
+                tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE)
+        ):
+            # STS
+            token_ids_sts = batch_sts['token_ids_1'].to(device)
+            attention_mask_sts = batch_sts['attention_mask_1'].to(device)
+            token_ids2_sts = batch_sts['token_ids_2'].to(device)
+            attention_mask2_sts = batch_sts['attention_mask_2'].to(device)
+            labels_sts = batch_sts['labels'].to(device)
+
+            # SST
+            token_ids_sst, attention_mask_sst, labels_sst = (batch_sst['token_ids'].to(device),
+                                                             batch_sst['attention_mask'].to(device),
+                                                             batch_sst['labels'].to(device))
+
+            ### Para
+            token_ids_para = batch_para['token_ids_1'].to(device)
+            attention_mask_para = batch_para['attention_mask_1'].to(device)
+            token_ids2_para = batch_para['token_ids_2'].to(device)
+            attention_mask2_para = batch_para['attention_mask_2'].to(device)
+            labels_para = batch_para['labels'].to(device)
+
+
+            logits_sts = model.predict_similarity(token_ids_sts, attention_mask_sts, token_ids2_sts, attention_mask2_sts)
+            logits_sts = logits_sts.flatten()
+            logits_sts = (logits_sts.sigmoid() * 5).to(device)
+
+            logits_para = model.predict_paraphrase(token_ids_para, attention_mask_para, token_ids2_para, attention_mask2_para)
+            logits_para = logits_para.sigmoid().round().flatten().to(device)
+
+            logits_sst = model.predict_sentiment(token_ids_sst, attention_mask_sst)
+
+            optimizer.zero_grad()
+            loss_sts = F.cross_entropy(logits_sts, labels_sts.view(-1).float(), reduction='sum') / args.batch_size
+            loss_sts.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            loss_para = F.cross_entropy(logits_para, labels_para.view(-1).float(), reduction='sum') / args.batch_size
+            loss_para.backward()
+            optimizer.step()
+
+            optimizer.zero_grad()
+            loss_sst = F.cross_entropy(logits_sst, labels_sst.view(-1), reduction='sum') / args.batch_size
+            loss_sst.backward()
+            optimizer.step()
+
+
+            # loss.backward()
+            # optimizer.step()
+
+            train_loss += loss_sts.item()  + loss_sst.item() + loss_para.item()
+            num_batches += 1
+
+        train_loss = train_loss / (num_batches)
+
+        # train_acc_sts, train_f1_sts, *_ = model_eval_sts(sts_train_dataloader, model, device)
+        # dev_acc_sts, dev_f1_sts, *_ = model_eval_sts(sts_dev_dataloader, model, device)
+        #
+        # train_acc_para, train_f1_para, *_ = model_eval_para(para_train_dataloader, model, device)
+        # dev_acc_para, dev_f1_para, *_ = model_eval_para(para_dev_dataloader, model, device)
+        #
+        # train_acc_sst, train_f1_sst, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        # dev_acc_sst, dev_f1_sst, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        #
+        # dev_acc = dev_acc_sst + dev_acc_para + dev_acc_sts
+        # train_acc = train_acc_sst + train_acc_para + train_acc_sts
+        #
+        # if dev_acc > best_dev_acc:
+        #     best_dev_acc = dev_acc
+        save_model(model, optimizer, args, config, str(epoch)+args.filepath)
+
+        print(
+            f"STS Epoch {epoch}: train loss :: {train_loss :.3f}, ") #train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 def pcgrad(grads1, grads2):
     """
