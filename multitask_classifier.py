@@ -256,6 +256,19 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
+def save_model_loss(model, loss_sst, loss_sts, loss_para, loss, filepath):
+    save_info = {
+        'model': model.state_dict(),
+        'loss_sst': loss_sst,
+        'loss_sts': loss_sts,
+        'loss_para': loss_para,
+        'loss': loss
+    }
+
+    torch.save(save_info, filepath)
+    print(f"save the model to {filepath}")
+
+
 # gradient surgery util function
 def project_gradients(grads):
     """
@@ -528,8 +541,14 @@ def train_mixed_model(args, config, device, model, optimizer,
 
             train_loss += loss_sts.item()  + loss_sst.item() + loss_para.item()
             num_batches += 1
+            filepath = str(num_batches) + "-model-loss"
+            save_model_loss(model, loss_sst.cpu().detach().numpy(), loss_sts.cpu().detach().numpy(),
+                            loss_para.cpu().detach().numpy(), train_loss, filepath)
+            if(num_batches > 50):
+                return
 
         train_loss = train_loss / (num_batches)
+
 
         # train_acc_sts, train_f1_sts, *_ = model_eval_sts(sts_train_dataloader, model, device)
         # dev_acc_sts, dev_f1_sts, *_ = model_eval_sts(sts_dev_dataloader, model, device)
