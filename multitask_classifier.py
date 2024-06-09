@@ -334,16 +334,16 @@ def train_multitask(args):
               'data_dir': '.',
               'fine_tune_mode': args.fine_tune_mode}
 
-    config = SimpleNamespace(**config)
-    model = MultitaskBERT(config)
-    model = model.to(device)
-
-    # saved = torch.load(args.filepath)
-    # config = saved['model_config']
-    #
+    # config = SimpleNamespace(**config)
     # model = MultitaskBERT(config)
-    # model.load_state_dict(saved['model'])
     # model = model.to(device)
+
+    saved = torch.load(args.filepath)
+    config = saved['model_config']
+
+    model = MultitaskBERT(config)
+    model.load_state_dict(saved['model'])
+    model = model.to(device)
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
@@ -1021,7 +1021,7 @@ def get_args():
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
-    # parser.add_argument("--filepath", type=str, help="filepath", default="")
+    parser.add_argument("--filepath", type=str, help="filepath", default="")
 
     args = parser.parse_args()
     return args
@@ -1029,7 +1029,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
+    # args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     train_multitask(args)
     # test_multitask(args)
